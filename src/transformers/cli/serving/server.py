@@ -38,6 +38,26 @@ from .utils import X_REQUEST_ID, CBWorkerDeadError, GenerationState
 logger = logging.get_logger(__name__)
 
 
+# Global reference used by the module-level lifespan so it is picklable.
+# The decorator @spaces.GPU uses a multiprocessing queue which requires
+# all referenced functions to be picklable — local functions are not.
+_model_manager_for_lifespan: "ModelManager | None" = None
+
+
+@asynccontextmanager
+async def _app_lifespan(app: FastAPI):  # type: ignore[empty-body]
+    """Module-level lifespan so it can be pickled by ``@spaces.GPU``.
+
+    Sets ``_model_manager_for_lifespan`` during ``build_server`` so the
+    global is available when ``shutdown()`` is called on app exit.
+    """
+    global _model_manager_for_lifespan
+    yield
+    if _model_manager_for_lifespan is not None:
+        _model_manager_for_lifespan.shutdown()
+        _model_manager_for_lifespan = None
+
+
 def _apply_zerogpu(endpoint):
     """Wrap an endpoint with ``@spaces.GPU`` if ZeroGPU is active.
 
@@ -81,13 +101,10 @@ def build_server(
     Returns:
         A FastAPI app ready to be passed to uvicorn.
     """
+    global _model_manager_for_lifespan
+    _model_manager_for_lifespan = model_manager
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        yield
-        model_manager.shutdown()
-
-    app = FastAPI(lifespan=lifespan)
+    app = FastAPI(lifespan=_app_lifespan)
 
     @app.exception_handler(CBWorkerDeadError)
     async def _cb_dead_handler(_request: Request, exc: CBWorkerDeadError):
